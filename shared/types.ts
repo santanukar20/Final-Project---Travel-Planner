@@ -7,7 +7,10 @@ export type TimeOfDay = "Morning" | "Afternoon" | "Evening";
 
 export interface Constraints {
   city: string;                 // e.g., "Jaipur"
-  numDays: number;              // 2–4 (capstone scope)
+  resolvedCity?: string;        // canonical city name from Nominatim
+  lat?: number;                 // latitude from geocoding
+  lon?: number;                 // longitude from geocoding
+  numDays: number;              // 2-5 (capstone scope)
   datesText?: string;           // e.g., "next weekend" (optional)
   pace: Pace;
   interests: string[];          // e.g., ["food","culture"]
@@ -180,7 +183,12 @@ export type ToolName =
   | "itinerary_builder_mcp"
   | "rag_retrieval"
   | "weather_mcp"
-  | "travel_time_mcp";
+  | "travel_time_mcp"
+  | "llm_intent_detect"
+  | "llm_extract_constraints"
+  | "llm_extract_edit_command"
+  | "llm_generate_explanation"
+  | "wikivoyage_mcp";
 
 export interface ToolCallTrace {
   toolName: ToolName;
@@ -276,4 +284,16 @@ export interface ExportRequest {
 export interface ExportResponse {
   status: "queued" | "sent" | "failed";
   message?: string;
+}
+
+export interface EmailItineraryRequest {
+  sessionId: string;
+  toEmail: string;
+}
+
+export interface EmailItineraryResponse {
+  ok: boolean;
+  messageId?: string;
+  sentTo?: string;
+  error?: string;
 }
