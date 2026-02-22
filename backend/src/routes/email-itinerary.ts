@@ -26,7 +26,7 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     // Load session
-    let session = sessionStore.get(sessionId);
+    const session = sessionStore.get(sessionId);
     if (!session) {
       return res.status(404).json({
         ok: false,
@@ -42,11 +42,7 @@ router.post('/', async (req: Request, res: Response) => {
       } as EmailItineraryResponse);
     }
 
-    // Log the request
-    const startTime = performance.now();
-    console.log('[/email-itinerary] Request:', { sessionId, toEmail });
-
-    // Call n8n service
+    // Call email service
     const result = await sendItineraryEmail({
       toEmail,
       sessionId,
@@ -55,17 +51,24 @@ router.post('/', async (req: Request, res: Response) => {
       sources: session.poiCatalog,
     });
 
-    const duration = Math.round(performance.now() - startTime);
-
     if (result.ok) {
-      console.log('[/email-itinerary] Success:', { duration, messageId: result.messageId });
-      return res.json(result as EmailItineraryResponse);
+      return res.json({
+        ok: true,
+        requestId: result.requestId,
+        messageId: result.messageId,
+        sentTo: result.sentTo,
+        dryRun: result.dryRun,
+        pdfSizeBytes: result.pdfSizeBytes,
+      } as EmailItineraryResponse);
     } else {
-      console.error('[/email-itinerary] Failed:', { duration, error: result.error });
-      return res.status(500).json(result as EmailItineraryResponse);
+      return res.status(500).json({
+        ok: false,
+        requestId: result.requestId,
+        error: result.error,
+      } as EmailItineraryResponse);
     }
   } catch (error: any) {
-    console.error('[/email-itinerary] Error:', error);
+    console.error('[/email-itinerary] Unhandled error:', error);
     return res.status(500).json({
       ok: false,
       error: error.message || 'Internal server error',

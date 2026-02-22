@@ -7,7 +7,7 @@ import { wikivoyageMcp } from '../tools/wikivoyage_mcp';
 import { weatherMcp } from '../tools/weather_mcp';
 import { evaluateFeasibility } from '../evals/feasibility';
 import { evaluateGrounding } from '../evals/grounding';
-import { detectIntent, extractPlanConstraints, resolveIntentForEndpoint } from '../services/llm';
+import { extractPlanConstraints } from '../services/llm';
 import { validateCityInIndia } from '../services/geocode';
 import { extractCityDeterministic } from '../services/cityExtract';;
 
@@ -15,49 +15,25 @@ const router = Router();
 
 router.post('/', async (req: Request<{}, {}, PlanRequest>, res: Response<PlanResponse>) => {
   try {
-    const { utterance, sessionId, defaults } = req.body;
+    const { utterance, sessionId, defaults, intentHint } = req.body;
     const newSessionId = sessionId || sessionStore.generateSessionId();
 
-    // LLM: Detect intent with fallback coercion for /plan endpoint
-    const intentResult = await resolveIntentForEndpoint(utterance, 'PLAN');
+    // Log intent (no backend reclassification - /plan always executes PLAN logic)
+    console.log('[/plan] Executing PLAN logic', { intentHint: intentHint || 'none', utterance });
+
+    // JAIPUR DEMO: Hard-lock city to Jaipur - ignore transcript city extraction
+    const LOCKED_CITY = 'Jaipur';
+    console.log('[/plan] CITY_LOCK: Using hard-coded city:', LOCKED_CITY);
     
-    // Log intent detection for debugging
-    const isCoerced = intentResult.confidence === 0.6 && intentResult.rationale.includes('fallback');
-    console.log('[/plan] Intent detection:', {
-      original: isCoerced ? 'UNKNOWN (coerced)' : intentResult.intent,
-      resolved: intentResult.intent,
-      confidence: intentResult.confidence,
-      rationale: intentResult.rationale,
-    });
-
-    // LLM: Extract constraints with deterministic fallback
-    const cityFromRegex = extractCityDeterministic(utterance);
-    console.log('[/plan] cityFromRegex:', cityFromRegex);
+    // LLM: Extract constraints (but ignore city)
     const extractedConstraints = await extractPlanConstraints(utterance);
-    console.log('[/plan] extractedConstraints.city:', extractedConstraints.city);
-    const city = cityFromRegex ?? extractedConstraints.city;
-    console.log('[/plan] Final city:', city);
-    if (!city) {
-      return res.status(400).json({
-        error: {
-          message: 'Which city in India? (e.g., Pune, Kochi, Delhi, Mumbai)',
-          code: 'MISSING_CITY',
-          details: { reason: 'City name could not be extracted from utterance' },
-        },
-      } as any);
-    }
-
-    // Validate city is in India via Nominatim
-    const geocodeResult = await validateCityInIndia(city);
-    if (!geocodeResult) {
-      return res.status(400).json({
-        error: {
-          message: `${city} not found in India. Try a different spelling or another city.`,
-          code: 'CITY_NOT_IN_INDIA',
-          details: { city, reason: 'City not found via geocoding' },
-        },
-      } as any);
-    }
+    
+    // Use pre-defined Jaipur coordinates (skip geocoding API call)
+    const geocodeResult = {
+      resolvedCity: LOCKED_CITY,
+      lat: 26.9124,
+      lon: 75.7873,
+    };
 
     // Clamp numDays to 2-5
     let numDays = extractedConstraints.numDays || 3;
@@ -148,12 +124,6 @@ router.post('/', async (req: Request<{}, {}, PlanRequest>, res: Response<PlanRes
       toolTrace: {
         calls: [
           {
-            toolName: 'llm_intent_detect',
-            inputSummary: `Detect intent from utterance`,
-            outputSummary: `Intent: ${intentResult.intent}, Confidence: ${intentResult.confidence.toFixed(2)}, Rationale: ${intentResult.rationale}`,
-            timestampISO: new Date().toISOString(),
-          },
-          {
             toolName: 'llm_extract_constraints',
             inputSummary: `Extract constraints from utterance`,
             outputSummary: `Pace: ${extractedConstraints.pace || 'default'}, Interests: ${(extractedConstraints.interests || []).join(', ') || 'default'}`,
@@ -194,7 +164,6 @@ router.post('/', async (req: Request<{}, {}, PlanRequest>, res: Response<PlanRes
     res.json({
       session,
       llm: {
-        intent: intentResult,
         extractedConstraints,
       },
     } as any);

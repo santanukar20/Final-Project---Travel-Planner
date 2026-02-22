@@ -49,7 +49,7 @@ export type EditCommand = z.infer<typeof EditCommandSchema>;
 export const CitationSchema = z.object({
   sourceType: z.enum(["OSM", "WIKIVOYAGE", "WEATHER"]),
   ref: z.string(),
-  quote: z.string().max(15),
+  quote: z.string().max(200),
 });
 
 export const ExplainResultSchema = z.object({
@@ -176,8 +176,17 @@ function fallbackEditCommand(transcript: string): EditCommand {
 
   const cmd: EditCommand = { action, scope: {} };
 
-  const dayMatch = lower.match(/day\s*(\d+)/);
-  if (dayMatch) cmd.scope!.dayIndex = parseInt(dayMatch[1], 10) as 1 | 2 | 3;
+  // Handle both digit and word numbers for day
+  const dayDigitMatch = lower.match(/day\s*(\d+)/);
+  const dayWordMatch = lower.match(/day\s*(one|two|three|four|five|1|2|3|4|5)/i);
+  
+  if (dayDigitMatch) {
+    cmd.scope!.dayIndex = parseInt(dayDigitMatch[1], 10) as 1 | 2 | 3;
+  } else if (dayWordMatch) {
+    const wordToNum: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5 };
+    const num = wordToNum[dayWordMatch[1].toLowerCase()] || parseInt(dayWordMatch[1], 10);
+    cmd.scope!.dayIndex = num as 1 | 2 | 3;
+  }
 
   if (lower.includes("morning")) cmd.scope!.block = "morning";
   else if (lower.includes("afternoon")) cmd.scope!.block = "afternoon";
@@ -330,27 +339,242 @@ Transcript: ${JSON.stringify(transcript)}`;
   }
 }
 
+/**
+ * Generate context-aware explanation with POI-specific reasoning
+ */
+export async function generateExplanationV2(params: {
+  question: string;
+  itinerary: any;
+  constraints: any;
+  poiCatalog: Record<string, any>;
+  targetPoiId?: string;
+}): Promise<ExplainResult> {
+  const { question, itinerary, constraints, poiCatalog, targetPoiId } = params;
+
+  // Determine mode and POI context BEFORE try block so catch can use it
+  let mode: 'poi' | 'itinerary' = 'itinerary';
+  let poiContext: any = null;
+  let targetSlot: { day: number; timeOfDay: string } | null = null;
+
+  if (targetPoiId && poiCatalog[targetPoiId]) {
+    // POI mode: specific POI provided
+    mode = 'poi';
+    poiContext = poiCatalog[targetPoiId];
+    
+    // Find where this POI appears in itinerary
+    for (let dayIdx = 0; dayIdx < itinerary.days.length; dayIdx++) {
+      const day = itinerary.days[dayIdx];
+      for (const block of day.blocks) {
+        if (block.poiId === targetPoiId) {
+          targetSlot = { day: dayIdx + 1, timeOfDay: block.timeOfDay };
+          break;
+        }
+      }
+      if (targetSlot) break;
+    }
+  } else {
+    // Try to extract POI name from question (case-insensitive substring match)
+    const lowerQuestion = question.toLowerCase();
+    let longestMatch = '';
+    let matchedPoiId = '';
+    
+    // Build list of all POI names from itinerary
+    for (const day of itinerary.days) {
+      for (const block of day.blocks) {
+        if (block.poiId && poiCatalog[block.poiId]) {
+          const poiName = poiCatalog[block.poiId].name.toLowerCase();
+          const blockTitle = block.title.toLowerCase();
+            
+            // Try matching against both POI name and block title
+            // Also split POI name into words for partial matching (e.g., "Albert Hall" matches "Albert Hall Museum")
+            const poiWords = poiName.split(/\s+/);
+            const titleWords = blockTitle.split(/\s+/);
+            
+            // Check full name match
+            if (lowerQuestion.includes(poiName) && poiName.length > longestMatch.length) {
+              longestMatch = poiName;
+              matchedPoiId = block.poiId;
+            }
+            
+            // Check title match
+            if (lowerQuestion.includes(blockTitle) && blockTitle.length > longestMatch.length) {
+              longestMatch = blockTitle;
+              matchedPoiId = block.poiId;
+            }
+            
+            // Check partial word match (at least 2 words from POI name)
+            if (poiWords.length >= 2) {
+              let matchedWords = 0;
+              for (const word of poiWords) {
+                if (word.length > 3 && lowerQuestion.includes(word)) {
+                  matchedWords++;
+                }
+              }
+              if (matchedWords >= 2 && poiName.length > longestMatch.length) {
+                longestMatch = poiName;
+                matchedPoiId = block.poiId;
+              }
+            }
+            
+            // Check partial word match for title
+            if (titleWords.length >= 2) {
+              let matchedWords = 0;
+              for (const word of titleWords) {
+                if (word.length > 3 && lowerQuestion.includes(word)) {
+                  matchedWords++;
+                }
+              }
+              if (matchedWords >= 2 && blockTitle.length > longestMatch.length) {
+                longestMatch = blockTitle;
+                matchedPoiId = block.poiId;
+              }
+            }
+          }
+        }
+      }
+      
+      if (matchedPoiId) {
+        mode = 'poi';
+        poiContext = poiCatalog[matchedPoiId];
+        
+        // Find slot
+        for (let dayIdx = 0; dayIdx < itinerary.days.length; dayIdx++) {
+          const day = itinerary.days[dayIdx];
+          for (const block of day.blocks) {
+            if (block.poiId === matchedPoiId) {
+              targetSlot = { day: dayIdx + 1, timeOfDay: block.timeOfDay };
+              break;
+            }
+          }
+          if (targetSlot) break;
+        }
+      }
+    }
+
+  try {
+    let prompt: string;
+    let qualityCheck: (answer: string) => boolean;
+
+    if (mode === 'poi' && poiContext && targetSlot) {
+      // POI-specific explanation
+      const poiMetadata = {
+        name: poiContext.name,
+        type: poiContext.type,
+        typicalDuration: poiContext.typicalDurationHours,
+        tags: poiContext.tags,
+      };
+
+      prompt = `You are explaining why "${poiContext.name}" was included in a ${constraints.pace} ${constraints.numDays}-day Jaipur itinerary.
+
+STRICT OUTPUT RULES:
+1. MUST mention "${poiContext.name}" by name in the first sentence
+2. Explain using ONLY this metadata: ${JSON.stringify(poiMetadata, null, 2)}
+3. Reference that it's in Day ${targetSlot.day} ${targetSlot.timeOfDay} slot
+4. Mention typicalDuration=${poiContext.typicalDurationHours}h fits ${constraints.pace} pace
+5. Add 1 practical tip from tags
+6. NO generic phrases like "optimized" or "based on available sources"
+7. Be conversational and specific
+
+Return ONLY JSON: {"answer": "3-5 sentences explaining why this POI was chosen", "citations": [{"sourceType": "OSM", "ref": "${poiContext.name}", "quote": "POI metadata"}]}
+
+Question: ${question}`;
+
+      qualityCheck = (answer: string) => {
+        const lowerAnswer = answer.toLowerCase();
+        const poiNameLower = poiContext.name.toLowerCase();
+        return lowerAnswer.includes(poiNameLower);
+      };
+    } else {
+      // Itinerary-wide explanation
+      const itineraryPois = itinerary.days.flatMap((day: any, dayIdx: number) =>
+        day.blocks
+          .filter((b: any) => b.poiId && poiCatalog[b.poiId])
+          .map((b: any) => ({
+            day: dayIdx + 1,
+            timeOfDay: b.timeOfDay,
+            name: poiCatalog[b.poiId].name,
+            type: poiCatalog[b.poiId].type,
+          }))
+      );
+
+      prompt = `You are explaining a ${constraints.pace} ${constraints.numDays}-day Jaipur itinerary.
+
+STRICT OUTPUT RULES:
+1. MUST mention at least 2 POI names from: ${itineraryPois.map((p: any) => p.name).join(', ')}
+2. Explain day-by-day flow with specific POI types (${itineraryPois.map((p: any) => p.type).join(', ')})
+3. Reference ${constraints.pace} pace and ${constraints.numDays} days
+4. NO generic phrases like "optimized" or "based on available sources"
+5. Be conversational and specific
+
+Return ONLY JSON: {"answer": "3-5 sentences explaining the itinerary logic", "citations": [{"sourceType": "OSM", "ref": "Jaipur", "quote": "POI data"}]}
+
+Question: ${question}
+POIs: ${JSON.stringify(itineraryPois, null, 2)}`;
+
+      qualityCheck = (answer: string) => {
+        const lowerAnswer = answer.toLowerCase();
+        let mentionedCount = 0;
+        for (const poi of itineraryPois.slice(0, 3)) {
+          if (lowerAnswer.includes(poi.name.toLowerCase())) mentionedCount++;
+        }
+        return mentionedCount >= 2;
+      };
+    }
+
+    console.log(`[EXPLAIN] Mode: ${mode}, POI: ${poiContext?.name || 'N/A'}, Slot: ${targetSlot ? `Day ${targetSlot.day} ${targetSlot.timeOfDay}` : 'N/A'}`);
+
+    // Try LLM with quality check
+    let result = await callGroqJson(prompt);
+    let explanation = ExplainResultSchema.parse(result);
+
+    if (!qualityCheck(explanation.answer)) {
+      console.warn('[EXPLAIN] Quality check failed, retrying with stronger instruction...');
+      prompt = prompt.replace('STRICT OUTPUT RULES:', 'CRITICAL: YOU WILL BE PENALIZED IF YOU USE GENERIC TEXT. STRICT OUTPUT RULES:');
+      result = await callGroqJson(prompt);
+      explanation = ExplainResultSchema.parse(result);
+    }
+
+    // Final quality check - use deterministic fallback if still bad
+    if (!qualityCheck(explanation.answer)) {
+      console.warn('[EXPLAIN] Quality check failed again, using deterministic fallback');
+      
+      if (mode === 'poi' && poiContext && targetSlot) {
+        explanation.answer = `${poiContext.name} is a ${poiContext.type} site included in your Day ${targetSlot.day} ${targetSlot.timeOfDay} slot. It typically takes ${poiContext.typicalDurationHours} hours to visit, which fits your ${constraints.pace} pace perfectly. This location was selected from OpenStreetMap data for its cultural significance and accessibility in Jaipur.`;
+      } else {
+        const firstTwo = itinerary.days[0]?.blocks.slice(0, 2).map((b: any) => b.title).join(' and ') || 'key sites';
+        explanation.answer = `Your ${constraints.numDays}-day ${constraints.pace}-paced Jaipur itinerary includes ${firstTwo}, carefully selected to balance cultural experiences with comfortable timing. Each day is structured with morning, afternoon, and evening activities chosen from verified OpenStreetMap points of interest.`;
+      }
+    }
+
+    return explanation;
+  } catch (err) {
+    console.error("[EXPLAIN] Generation failed completely, using emergency fallback", err);
+    
+    // Emergency deterministic fallback - USE MATCHED POI CONTEXT if available
+    if (mode === 'poi' && poiContext && targetSlot) {
+      return {
+        answer: `${poiContext.name} is included in your Day ${targetSlot.day} ${targetSlot.timeOfDay} slot. As a ${poiContext.type || 'notable'} site in Jaipur, it typically takes ${poiContext.typicalDurationHours || 1.5} hours to visit, fitting well with your ${constraints.pace} pace. This location was selected from OpenStreetMap data for its cultural significance.`,
+        citations: [{ sourceType: 'OSM', ref: poiContext.name, quote: 'POI data' }],
+      };
+    } else {
+      const firstPoi = itinerary.days[0]?.blocks[0]?.title || 'activities';
+      return {
+        answer: `Your ${constraints.numDays}-day Jaipur itinerary starts with ${firstPoi}, selected for its cultural significance and accessibility. The ${constraints.pace} pace ensures comfortable exploration with proper time at each location.`,
+        citations: [{ sourceType: 'OSM', ref: 'Jaipur', quote: 'POI data' }],
+      };
+    }
+  }
+}
+
+// Keep old function for backward compatibility
 export async function generateExplanation(
   question: string,
   itinerary: any,
   sources: any
 ): Promise<ExplainResult> {
-  try {
-    const sourceSummary = sources
-      ? `Available sources: ${JSON.stringify(Object.keys(sources))}`
-      : "No sources available";
-    const prompt = `Generate explanation based on itinerary.
-Return ONLY JSON: {"answer": "...", "citations": [{"sourceType": "OSM|WIKIVOYAGE|WEATHER", "ref": "...", "quote": "..."}]}
-Question: ${JSON.stringify(question)}
-${sourceSummary}`;
-
-    const result = await callGroqJson(prompt);
-    return ExplainResultSchema.parse(result);
-  } catch (err) {
-    console.warn("[LLM] Explanation generation failed, using fallback", err);
-    return {
-      answer: `The itinerary was designed based on available sources and optimization criteria.`,
-      citations: [],
-    };
-  }
+  console.warn('[EXPLAIN] Using deprecated generateExplanation, switch to generateExplanationV2');
+  return {
+    answer: `The itinerary was designed based on available sources and optimization criteria.`,
+    citations: [],
+  };
 }

@@ -1,16 +1,21 @@
 import { Router, Request, Response } from 'express';
 import { ExplainRequest, ExplainResponse } from '@shared/types';
 import { sessionStore } from '../state/sessionStore';
-import { generateExplanation, resolveIntentWithFallback } from '../services/llm';
+import { generateExplanationV2, resolveIntentWithFallback } from '../services/llm';
 
 const router = Router();
 
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const { sessionId, question, poiId } = req.body as ExplainRequest;
+    const { sessionId, question, poiId, intentHint } = req.body as ExplainRequest;
+    
+    // Log intent (no backend reclassification - /explain always executes EXPLAIN logic)
+    console.log('[/explain] Executing EXPLAIN logic', { intentHint: intentHint || 'none', question, poiId: poiId || 'none' });
+    
     const session = sessionStore.get(sessionId);
 
     if (!session) {
+      console.log('[/explain] Session not found:', sessionId);
       return res.status(404).json({
         error: {
           message: 'Session not found',
@@ -20,24 +25,30 @@ router.post('/', async (req: Request, res: Response) => {
       } as any);
     }
 
-    // LLM: Resolve intent with deterministic fallback (never fails)
-    const intentResult = await resolveIntentWithFallback(question, 'EXPLAIN');
+    if (!session.itinerary || !session.itinerary.days.length) {
+      console.log('[/explain] No itinerary in session');
+      return res.status(400).json({
+        error: {
+          message: 'No itinerary to explain. Please create an itinerary first.',
+          code: 'NO_ITINERARY',
+        },
+      } as any);
+    }
 
-    // LLM: Generate explanation
-    const explanation = await generateExplanation(
+    console.log('[/explain] Generating explanation with V2 (POI grounding)');
+
+    // Generate context-aware explanation with POI metadata
+    const explanation = await generateExplanationV2({
       question,
-      session.itinerary,
-      session.poiResult.pois
-    );
-
-    // Add tool trace with intent tracking
-    session.toolTrace.calls.push({
-      toolName: 'llm_intent_detect',
-      inputSummary: `Detect EXPLAIN intent`,
-      outputSummary: `Intent: ${intentResult.intent}, Confidence: ${intentResult.confidence.toFixed(2)}, Original: ${(intentResult as any).original || 'N/A'}, Resolved: ${(intentResult as any).resolved || 'N/A'}`,
-      timestampISO: new Date().toISOString(),
+      itinerary: session.itinerary,
+      constraints: session.constraints,
+      poiCatalog: session.poiCatalog,
+      targetPoiId: poiId,
     });
 
+    console.log('[/explain] Generated answer:', explanation.answer.slice(0, 100) + '...');
+
+    // Add tool trace
     session.toolTrace.calls.push({
       toolName: 'llm_generate_explanation',
       inputSummary: `Generate explanation for: ${question}`,
@@ -49,9 +60,6 @@ router.post('/', async (req: Request, res: Response) => {
       answer: explanation.answer,
       citations: explanation.citations || [],
       relatedEvals: [session.evals.feasibility, session.evals.grounding],
-      llm: {
-        intent: intentResult,
-      },
     } as any);
   } catch (error) {
     console.error('[/explain] Error:', error);

@@ -70,6 +70,7 @@ export const api = {
       sessionId,
       utterance: transcript,
       editCommand,
+      intentHint: 'EDIT_ITINERARY',
     });
     return response.data;
   },
@@ -83,6 +84,7 @@ export const api = {
       sessionId,
       question,
       itinerarySnapshot,
+      intentHint: 'EXPLAIN_ITINERARY',
     });
     return response.data;
   },

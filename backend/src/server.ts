@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import planRoute from './routes/plan-llm';
-import editRoute from './routes/edit-llm';
+import editRoute from './routes/edit';
 import explainRoute from './routes/explain-llm';
 import exportRoute from './routes/export';
 import emailRoute from './routes/email-itinerary';

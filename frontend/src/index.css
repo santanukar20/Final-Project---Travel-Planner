@@ -23,3 +23,19 @@ body {
 #root {
   min-height: 100vh;
 }
+
+/* Flash highlight animation for edited itinerary blocks */
+.flash-highlight {
+  background-color: #fff3b0 !important;
+  animation: fadeHighlight 1800ms ease-out forwards;
+}
+
+@keyframes fadeHighlight {
+  0% {
+    background-color: #fff3b0;
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+

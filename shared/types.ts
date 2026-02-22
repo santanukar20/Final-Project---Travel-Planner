@@ -228,6 +228,7 @@ export interface PlanRequest {
   sessionId?: string;      // optional if continuing a session
   utterance: string;       // transcript from voice or typed text
   defaults?: Partial<Constraints>; // optional defaults
+  intentHint?: 'PLAN_TRIP'; // optional frontend intent hint (backend always executes PLAN)
 }
 
 export interface PlanResponse {
@@ -237,10 +238,20 @@ export interface PlanResponse {
 export interface EditRequest {
   sessionId: string;
   utterance: string;       // voice command transcript
+  intentHint?: 'EDIT_ITINERARY'; // optional frontend intent hint (backend always executes EDIT)
 }
 
 export interface EditResponse {
   session: SessionState;
+  editApplied?: {
+    command: {
+      action: string;
+      scope?: { dayIndex?: number; block?: string };
+      params?: Record<string, any>;
+    };
+    changedDays: number[];
+    changedBlocks: string[];
+  };
 }
 
 export interface ExplainRequest {
@@ -249,6 +260,7 @@ export interface ExplainRequest {
   dayName?: string;
   timeOfDay?: TimeOfDay;
   poiId?: string;
+  intentHint?: 'EXPLAIN_ITINERARY'; // optional frontend intent hint (backend always executes EXPLAIN)
 }
 
 export interface ExplainResponse {
@@ -293,7 +305,10 @@ export interface EmailItineraryRequest {
 
 export interface EmailItineraryResponse {
   ok: boolean;
+  requestId?: string;
   messageId?: string;
   sentTo?: string;
   error?: string;
+  dryRun?: boolean;
+  pdfSizeBytes?: number;
 }
